@@ -101,16 +101,6 @@ def run_conv_models(train_loader, test_loader, device, train_dir):
 
 
 def run_quantization_experiment(test_loader, train_dir):
-    """Dynamic int8 квантизация для всех моделей.
-
-    Берёт обученные .pth из saved_models, применяет
-    torch.quantization.quantize_dynamic к Linear-слоям, оценивает на CPU,
-    сохраняет в saved_models/quantized/.
-
-    Для свёрточных моделей dynamic quant трогает только финальный
-    Linear-слой (свёрточные слои остаются float). ConvGlobalPool, у которой
-    Linear нет вовсе, по сути не квантизуется.
-    """
     models_to_quantize = {
         "linear_classifier": LinearClassifier,
         "one_hidden_layer": OneHiddenLayer,
@@ -134,19 +124,14 @@ def run_quantization_experiment(test_loader, train_dir):
             continue
 
         print(f"\n=== Квантизация: {name} ===")
-        # Загружаем обученные веса в свежую модель на CPU
         model = cls()
         model.load_state_dict(torch.load(source_path, map_location="cpu"))
 
-        # Dynamic int8 квантизация Linear-слоёв
         quantized = quantize_dynamic(model)
 
-        # Оценка квантизованной модели — обязательно на CPU
         accuracy = evaluate(quantized, test_loader, cpu)
         print(f"Точность на тестовой выборке: {accuracy:.4f}")
 
-        # Сохраняем целиком: структура модели изменилась (QuantizedLinear),
-        # state_dict без структуры обратно не загрузить без возни.
         quant_path = QUANTIZED_DIR / f"{name}.pth"
         torch.save(quantized, quant_path)
 
@@ -167,19 +152,6 @@ def run_quantization_experiment(test_loader, train_dir):
 
 
 def run_distillation_experiment(train_loader, test_loader, device, train_dir):
-    """Дистилляция.
-
-    Часть 1: 9 учителей (всё, кроме LinearClassifier) → LinearClassifier студент.
-             Имена студентов: from_<teacher>.
-    Часть 2: 3 conv-учителя → ConvOneLayer студент (для более «честного»
-             сравнения внутри свёрточного семейства, иначе линейный студент
-             архитектурно не может усвоить conv-знания).
-             Имена студентов: conv1_from_<teacher>. ConvOneLayer как учитель
-             пропускается — это сама архитектура студента.
-
-    T и α — из constants.py. Сохраняются в saved_models/distilled/.
-    Если baseline .pth учителя нет — модель пропускается.
-    """
     all_teachers = {
         "one_hidden_layer": OneHiddenLayer,
         "wide_hidden": WideHidden,
@@ -191,7 +163,6 @@ def run_distillation_experiment(train_loader, test_loader, device, train_dir):
         "conv_deep": ConvDeep,
         "conv_global_pool": ConvGlobalPool,
     }
-    # Conv-учители для ConvOneLayer-студента (без самого conv_one_layer).
     conv_teachers_for_conv_student = {
         "conv_two_layers": ConvTwoLayers,
         "conv_deep": ConvDeep,
@@ -200,7 +171,6 @@ def run_distillation_experiment(train_loader, test_loader, device, train_dir):
     DISTILLED_DIR.mkdir(parents=True, exist_ok=True)
 
     def _distill_one(student_name, student, teacher_name, teacher_cls):
-        """Один эпизод дистилляции. Возвращает result-dict или None при пропуске."""
         teacher_path = SAVED_MODELS_DIR / f"{teacher_name}.pth"
         if not teacher_path.exists():
             print(f"\n=== Дистилляция: {student_name} ===  ПРОПУСК (нет {teacher_path.name})")
@@ -235,7 +205,6 @@ def run_distillation_experiment(train_loader, test_loader, device, train_dir):
 
     results = []
 
-    # Часть 1: LinearClassifier-студент от всех 9 учителей
     for teacher_name, teacher_cls in all_teachers.items():
         result = _distill_one(
             f"from_{teacher_name}", LinearClassifier(),
@@ -244,7 +213,6 @@ def run_distillation_experiment(train_loader, test_loader, device, train_dir):
         if result:
             results.append(result)
 
-    # Часть 2: ConvOneLayer-студент от conv-учителей
     for teacher_name, teacher_cls in conv_teachers_for_conv_student.items():
         result = _distill_one(
             f"conv1_from_{teacher_name}", ConvOneLayer(),
@@ -257,8 +225,6 @@ def run_distillation_experiment(train_loader, test_loader, device, train_dir):
 
 
 def _write_results_file(records, path, module_name, header_lines):
-    """Перезаписывает один файл результатов, обновляя записи по имени модели."""
-    # Уже сохранённые результаты прошлых запусков
     try:
         module = importlib.import_module(module_name)
         importlib.reload(module)
@@ -276,7 +242,6 @@ def _write_results_file(records, path, module_name, header_lines):
         for r in records
     ]
 
-    # Обновляем по имени: существующую запись заменяем, новую дописываем в конец
     all_records = list(existing)
     index_by_name = {rec["name"]: i for i, rec in enumerate(all_records)}
     for rec in new_records:
@@ -301,7 +266,6 @@ def _write_results_file(records, path, module_name, header_lines):
 
 
 def save_results(results):
-    """Распределяет результаты по файлам в зависимости от поля kind."""
     baseline = [r for r in results if r.get("kind", "baseline") == "baseline"]
     quantized = [r for r in results if r.get("kind") == "quantized"]
     distilled = [r for r in results if r.get("kind") == "distilled"]
@@ -351,8 +315,6 @@ def save_results(results):
 
 
 def main():
-    # Загрузка выборок из картинок (ImageFolder).
-    # ImageFolder отдаёт RGB, поэтому возвращаем картинку в 1 канал.
     transform = transforms.Compose([
         transforms.Grayscale(num_output_channels=1),
         transforms.ToTensor(),
@@ -364,18 +326,16 @@ def main():
     train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
     test_loader = DataLoader(test_set, batch_size=BATCH_SIZE, shuffle=False)
 
-    # Устройство: видеокарта Apple (MPS), иначе CPU
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Устройство: {device}")
 
     # закоментировать строки при за ненадобностью
     results = []
-    #results += run_fc_models(train_loader, test_loader, device, train_dir)
-    #results += run_conv_models(train_loader, test_loader, device, train_dir)
-    #results += run_quantization_experiment(test_loader, train_dir)
+    results += run_fc_models(train_loader, test_loader, device, train_dir)
+    results += run_conv_models(train_loader, test_loader, device, train_dir)
+    results += run_quantization_experiment(test_loader, train_dir)
     results += run_distillation_experiment(train_loader, test_loader, device, train_dir)
 
-    # Сводка по эксперименту
     print("\n=== Сводка ===")
     for r in results:
         kind = r.get("kind", "baseline")
@@ -385,8 +345,6 @@ def main():
             f"размер={r['bytes']} байт  коэффициент={r['ratio']:.2f}"
         )
 
-    # Сохранение результатов: baseline в results.py, квантизованные в
-    # results_quantized/, дистиллированные в results_distilled/
     save_results(results)
     print(
         "\nРезультаты сохранены:"
